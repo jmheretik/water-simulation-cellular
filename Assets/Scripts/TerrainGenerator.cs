@@ -1,7 +1,8 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Linq;
+using TerrainEngine;
+using TerrainEngine.Fluid.New;
 using UnityEngine;
 
 /// <summary>
@@ -9,10 +10,10 @@ using UnityEngine;
 /// </summary>
 public enum TerrainShape
 {
-    Ground,
-    Downhill,
-    Ubend,
-    Random
+	Ground,
+	Downhill,
+	Ubend,
+	Random
 }
 
 /// <summary>
@@ -20,218 +21,211 @@ public enum TerrainShape
 /// </summary>
 public class TerrainGenerator : MonoBehaviour
 {
-    [Header("Terrain generation")]
-    public TerrainShape shape = TerrainShape.Ground;
-    public string randomSeed;
-    [Range(0, 100)]
-    public int randomFillPercent = 50;
-    public int smoothSteps = 3;
+	[Header("Terrain generation")]
+	public TerrainShape Shape = TerrainShape.Ground;
+	public string RandomSeed;
+	[Range(0, 100)]
+	public int RandomFillPercent = 50;
+	public int SmoothSteps = 3;
+	public bool DebugFillWorldWithWater = false;
 
-    [Header("Terrain modification")]
-    [Range(byte.MinValue, Voxel.MaxVolume)]
-    public byte terrainValue = 20;
-    public int terrainRadius = 2;
+	[Header("Terrain modification")]
+	[Range(0, Voxel.kMaxVolume)]
+	public byte TerrainValue = 20;
+	public int TerrainRadius = 2;
 
-    private World world;
+	private WorldApi _worldApi;
+	private FluidProcessor _fluidProcessor;
 
-    public void Initialize(World world)
-    {
-        this.world = world;
-    }
+	public void Initialize()
+	{
+		_worldApi = GetComponent<WorldApi>();
+		_fluidProcessor = GetComponent<FluidProcessor>();
+	}
 
-    #region terrain generation
+	#region modification
 
-    /// <summary>
-    /// Generates terrain in a voxel according to user inputted parameters and chosen TerrainShape.
-    /// </summary>
-    public void GenerateTerrain(ref Vector3I indices, ref Voxel writeVoxel, float fluidFlowRadius, System.Random randomGenerator)
-    {
-        Vector3 voxelWorldPos;
+	/// <summary>
+	/// Adds or removes terrain at its surface.
+	/// </summary>
+	public void ModifyTerrain(Vector3 point, bool add)
+	{
+		for (float x = -TerrainRadius; x <= TerrainRadius; x = x + WorldGridInfo.kVoxelSize)
+		{
+			for (float z = -TerrainRadius; z <= TerrainRadius; z = z + WorldGridInfo.kVoxelSize)
+			{
+				// start at the bottom of world if adding terrain or at the top otherwise
+				Vector3 worldPosition = new Vector3(point.x + x, add ? WorldGridInfo.kVoxelSize : _worldApi.GetHeight() - WorldGridInfo.kVoxelSize, point.z + z);
 
-        world.GetVoxelWorldPos(ref indices, out voxelWorldPos);
+				// traverse the column at XZ position up or down
+				while (worldPosition.y > 0 && worldPosition.y < _worldApi.GetHeight())
+				{
+					Voxel voxelCopy = _worldApi.TryGetVoxel(in worldPosition, out VectorI3 indices);
 
-        if (world.IsBorder(ref voxelWorldPos))
-        {
-            writeVoxel.solid = Voxel.MaxVolume;
-            return;
-        }
+					if (!voxelCopy.Valid)
+						break;
 
-        switch (shape)
-        {
-            case TerrainShape.Downhill:
-                if (voxelWorldPos.y < voxelWorldPos.z)
-                    writeVoxel.solid = Voxel.MaxVolume;
-                return;
+					// if adding and found a not full voxel yet
+					// if removing and found a not empty voxel yet
+					if ((add && voxelCopy.Solid < Voxel.kMaxVolume) || (!add && voxelCopy.Solid > 0))
+					{
+						ModifyVoxel(ref voxelCopy, in indices, add, false);
+						break;
+					}
 
-            case TerrainShape.Ground:
-                if (voxelWorldPos.y == 1)
-                    writeVoxel.solid = Voxel.MaxVolume;
-                return;
+					worldPosition.y += add ? WorldGridInfo.kVoxelSize : -WorldGridInfo.kVoxelSize;
+				}
+			}
+		}
+	}
 
-            case TerrainShape.Random:
-                writeVoxel.solid = (byte)(randomGenerator.Next(0, 100) < randomFillPercent ? Voxel.MaxVolume : 0);
-                return;
+	/// <summary>
+	/// Removes all the terrain around a given point.
+	/// </summary>
+	public void RemoveTerrain(Vector3 point)
+	{
+		for (float y = -TerrainRadius * WorldGridInfo.kVoxelSize; y <= TerrainRadius * WorldGridInfo.kVoxelSize; y += WorldGridInfo.kVoxelSize)
+		{
+			for (float x = -TerrainRadius * WorldGridInfo.kVoxelSize; x <= TerrainRadius * WorldGridInfo.kVoxelSize; x += WorldGridInfo.kVoxelSize)
+			{
+				for (float z = -TerrainRadius * WorldGridInfo.kVoxelSize; z <= TerrainRadius * WorldGridInfo.kVoxelSize; z += WorldGridInfo.kVoxelSize)
+				{
+					Vector3 worldPosition = new Vector3(point.x + x, point.y + y, point.z + z);
 
-            case TerrainShape.Ubend:
-                if (voxelWorldPos.y == 1)
-                    writeVoxel.solid = Voxel.MaxVolume;
-                else if (voxelWorldPos.y > 3 && voxelWorldPos.x > (world.GetWidth() + 1) / 2 - fluidFlowRadius && voxelWorldPos.x < (world.GetWidth() + 1) / 2 + fluidFlowRadius)
-                    writeVoxel.solid = Voxel.MaxVolume;
-                return;
-        }
-    }
+					Voxel voxelCopy = _worldApi.TryGetVoxel(in worldPosition, out VectorI3 indices);
 
-    /// <summary>
-    /// Average smoothing of terrain in a voxel depending on the amount of solid in its neighbours.
-    /// </summary>
-    public void SmoothTerrain(ref Vector3I indices, ref Voxel writeVoxel)
-    {
-        Vector3 voxelWorldPos;
+					if (!voxelCopy.Valid)
+						continue;
 
-        world.GetVoxelWorldPos(ref indices, out voxelWorldPos);
+					ModifyVoxel(ref voxelCopy, in indices, false, true);
+				}
+			}
+		}
+	}
 
-        if (world.IsBorder(ref voxelWorldPos))
-            return;
+	/// <summary>
+	/// Modifies terrain value in a voxel.
+	/// </summary>
+	private void ModifyVoxel(ref Voxel voxelCopy, in VectorI3 indices, bool add, bool remove)
+	{
+		// adjust value
+		voxelCopy.Solid = (byte)(remove ? 0 : Mathf.Clamp(voxelCopy.Solid + (add ? TerrainValue : -TerrainValue), 0, Voxel.kMaxVolume));
 
-        // ground
-        if (voxelWorldPos.y == 0)
-            return;
+		// terrain modification may split or connect components
+		_fluidProcessor.ComponentManager.GetComponent(in indices)?.MarkForRebuild();
 
-        writeVoxel.solid = (byte)(GetSolidNeighboursCount(ref voxelWorldPos) > 13 * Voxel.MaxVolume ? Voxel.MaxVolume : 0);
-    }
+		// unsettle voxel and write the new value
+		voxelCopy.Unsettle(TerrainValue);
+		_worldApi.UnsettleChunk(in indices);
+		_worldApi.SetVoxelAfterSim(in indices, in voxelCopy);
+	}
 
-    #endregion
+	#endregion
 
-    #region terrain modification
+	#region generation
 
-    /// <summary>
-    /// Adds or removes terrain at its surface.
-    /// </summary>
-    public void ModifyTerrain(Vector3 point, bool add, FluidComponentManager componentManager)
-    {
-        Vector3I indices;
-        Vector3 worldPosition;
+	/// <summary>
+	/// Generates terrain in this block's chunks.
+	/// </summary>
+	public void LoadTerrain(Block block)
+	{
+		System.Random randomGenerator = null;
 
-        for (int x = -terrainRadius; x <= terrainRadius; x++)
-        {
-            for (int z = -terrainRadius; z <= terrainRadius; z++)
-            {
-                // start at the bottom of world if adding terrain or at the top otherwise
-                worldPosition.y = add ? 1 : world.GetHeight() - 1;
+		for (int chunkId = 0; chunkId < WorldGridInfo.kTotalChunksInBlock; chunkId++)
+		{
+			VectorI3 indices = new VectorI3(block.Id, chunkId, 0);
 
-                worldPosition.x = point.x + x;
-                worldPosition.z = point.z + z;
+			if (Shape == TerrainShape.Random)
+			{
+				// ensure consistency along chunks and blocks and respect the user inputted seed
+				randomGenerator = new System.Random(RandomSeed.GetHashCode() + indices.GetHashCode());
+			}
 
-                // traverse the column at XZ position up or down
-                while (world.GetVoxel(ref worldPosition, out indices))
-                {
-                    // if adding and found a not full voxel yet
-                    if (add && world.blocks[indices.x].writeVoxels[indices.y][indices.z].solid < Voxel.MaxVolume)
-                        break;
+			for (int voxelId = 0; voxelId < WorldGridInfo.kTotalVoxelsInChunk; voxelId++)
+			{
+				indices.z = voxelId;
 
-                    // if removing and found a not empty voxel yet
-                    if (!add && world.blocks[indices.x].writeVoxels[indices.y][indices.z].solid > 0)
-                        break;
+				block.Voxels.GetWritable(chunkId, voxelId).Solid = GenerateTerrain(in indices, randomGenerator);
+			}
+		}
+	}
 
-                    worldPosition.y += add ? 1 : -1;
-                }
+	/// <summary>
+	/// Returns average smoothed terrain value for a voxel depending on the amount of solid in its neighbours.
+	/// </summary>
+	public byte SmoothTerrain(in VectorI3 indices)
+	{
+		_worldApi.GetVoxelWorldPos(in indices, out Vector3 voxelWorldPos);
 
-                if (!indices.valid)
-                    continue;
+		if (_worldApi.IsBorder(in voxelWorldPos))
+			return Voxel.kMaxVolume;
 
-                HandleChanges(ref world.blocks[indices.x].writeVoxels[indices.y][indices.z], ref indices, false, add, componentManager);
-            }
-        }
-    }
+		return (byte)(GetSolidNeighboursCount(in voxelWorldPos) > 13 * Voxel.kMaxVolume ? Voxel.kMaxVolume : 0);
+	}
 
-    /// <summary>
-    /// Removes all the terrain around a given point.
-    /// </summary>
-    public void RemoveTerrain(Vector3 point, FluidComponentManager componentManager)
-    {
-        Vector3I indices;
-        Vector3 worldPosition;
+	/// <summary>
+	/// Return a terrain value for a voxel according to user inputted parameters and chosen TerrainShape.
+	/// </summary>
+	private byte GenerateTerrain(in VectorI3 indices, System.Random randomGenerator)
+	{
+		_worldApi.GetVoxelWorldPos(in indices, out Vector3 voxelWorldPos);
 
-        for (int y = -terrainRadius; y <= terrainRadius; y++)
-        {
-            for (int x = -terrainRadius; x <= terrainRadius; x++)
-            {
-                for (int z = -terrainRadius; z <= terrainRadius; z++)
-                {
-                    worldPosition.x = point.x + x;
-                    worldPosition.y = point.y + y;
-                    worldPosition.z = point.z + z;
+		// solid border
+		if (_worldApi.IsBorder(in voxelWorldPos))
+			return Voxel.kMaxVolume;
 
-                    if (world.GetVoxel(ref worldPosition, out indices))
-                    {
-                        HandleChanges(ref world.blocks[indices.x].writeVoxels[indices.y][indices.z], ref indices, true, false, componentManager);
-                    }
-                }
-            }
-        }
-    }
+		switch (Shape)
+		{
+			case TerrainShape.Downhill:
+				return (byte)(voxelWorldPos.y < voxelWorldPos.z ? Voxel.kMaxVolume : 0);
 
-    #endregion
+			case TerrainShape.Ground:
+				return (byte)(voxelWorldPos.y == WorldGridInfo.kVoxelSize ? Voxel.kMaxVolume : 0);
 
-    #region private methods
+			case TerrainShape.Random:
+				return (byte)(randomGenerator.Next(0, 100) < RandomFillPercent ? Voxel.kMaxVolume : 0);
 
-    /// <summary>
-    /// Terrain modification may split fluid components or connect them - they need to be reconstructed.
-    /// </summary>
-    private void HandleChanges(ref Voxel writeVoxel, ref Vector3I indices, bool remove, bool add, FluidComponentManager fluidComponentManager)
-    {
-        writeVoxel.solid = (byte)(remove ? 0 : Mathf.Clamp(writeVoxel.solid + (add ? 1 : -1) * terrainValue, byte.MinValue, Voxel.MaxVolume));
+			case TerrainShape.Ubend:
+				return (byte)(voxelWorldPos.y == WorldGridInfo.kVoxelSize ||
+					(
+						voxelWorldPos.y > 3 * WorldGridInfo.kVoxelSize &&
+						voxelWorldPos.x > (_worldApi.GetWidth() + WorldGridInfo.kVoxelSize) * 0.5f - _fluidProcessor.FlowRadius &&
+						voxelWorldPos.x < (_worldApi.GetWidth() + WorldGridInfo.kVoxelSize) * 0.5f + _fluidProcessor.FlowRadius
+					)
+					? Voxel.kMaxVolume : 0);
+		}
 
-        if (fluidComponentManager.GetComponent(ref indices) != null)
-        {
-            fluidComponentManager.GetComponent(ref indices).Rebuild();
-        }
+		return 0;
+	}
 
-        world.UnsettleChunkAndVoxel(ref indices);
+	/// <summary>
+	/// Returns amount of solid in voxels around given world position.
+	/// </summary>
+	private int GetSolidNeighboursCount(in Vector3 voxelWorldPos)
+	{
+		int count = 0;
 
-        // unsettle back and left chunk also so that meshes connect up properly
-        Vector3I nIndices;
-        world.GetNeighbour(ref indices, Neighbour.Backward, out nIndices);
-        world.UnsettleChunk(ref nIndices);
-        world.GetNeighbour(ref indices, Neighbour.Left, out nIndices);
-        world.UnsettleChunk(ref nIndices);
-    }
+		// 3x3x3 neighbourhood
+		for (float x = -WorldGridInfo.kVoxelSize; x <= WorldGridInfo.kVoxelSize; x += WorldGridInfo.kVoxelSize)
+		{
+			for (float y = -WorldGridInfo.kVoxelSize; y <= WorldGridInfo.kVoxelSize; y += WorldGridInfo.kVoxelSize)
+			{
+				for (float z = -WorldGridInfo.kVoxelSize; z <= WorldGridInfo.kVoxelSize; z += WorldGridInfo.kVoxelSize)
+				{
+					// skip self
+					if (x == voxelWorldPos.x && y == voxelWorldPos.y && z == voxelWorldPos.z)
+						continue;
 
-    /// <summary>
-    /// Returns amount of solid in voxels around given world position.
-    /// </summary>
-    private int GetSolidNeighboursCount(ref Vector3 voxelWorldPos)
-    {
-        Vector3I indices;
-        Vector3 worldPosition;
+					Vector3 neighbourWorldPos = new Vector3(voxelWorldPos.x + x, voxelWorldPos.y + y, voxelWorldPos.z + z);
 
-        int count = 0;
+					count += _worldApi.TryGetVoxel(in neighbourWorldPos, out _).Solid;
+				}
+			}
+		}
 
-        // 3x3x3 neighbourhood
-        for (int x = -1; x <= 1; x++)
-        {
-            for (int y = -1; y <= 1; y++)
-            {
-                for (int z = -1; z <= 1; z++)
-                {
-                    // skip self
-                    if (x == (int)voxelWorldPos.x && y == (int)voxelWorldPos.y && z == (int)voxelWorldPos.z)
-                        continue;
+		return count;
+	}
 
-                    worldPosition.x = voxelWorldPos.x + x;
-                    worldPosition.y = voxelWorldPos.y + y;
-                    worldPosition.z = voxelWorldPos.z + z;
+	#endregion
 
-                    if (world.GetVoxel(ref worldPosition, out indices))
-                    {
-                        count += world.blocks[indices.x].voxels[indices.y][indices.z].solid;
-                    }
-                }
-            }
-        }
-
-        return count;
-    }
-
-    #endregion
 }

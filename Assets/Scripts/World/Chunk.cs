@@ -1,67 +1,95 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Threading;
 using UnityEngine;
-using UnityEngine.Rendering;
 
-public class Chunk : MonoBehaviour
+namespace TerrainEngine.Fluid.New
 {
-    public const int Row = WorldGridInfo.kVoxelsPerChunk;
-    public const int Column = WorldGridInfo.kVoxelsPerChunk * WorldGridInfo.kVoxelsPerChunk;
-    public const int Offset = 1 - WorldGridInfo.kVoxelsPerChunk;
+	public class Chunk : MonoBehaviour, IDisposable
+	{
+		#region constants
 
-    public Block block;
+		public const int kRow = WorldGridInfo.kVoxelsPerChunk;
+		public const int kRowBordered = kRow + 2;
+		public const int kColumn = kRow * kRow;
+		public const int kColumnBordered = kRowBordered * kRowBordered;
+		public const int kTotalVoxelsInBordered = kRowBordered * kRowBordered * kRowBordered;
+		public const int kOffset = 1 - kRow;
+		public const int kRowOffseted = kRow * kOffset;
+		public const int kColumnOffseted = kColumn * kOffset;
 
-    public int id;
+		#endregion
 
-    public Chunk top;
-    public Chunk bottom;
-    public Chunk forward;
-    public Chunk backward;
-    public Chunk right;
-    public Chunk left;
+		public Block Block;
 
-    public bool settled;
-    public bool hasFluid;
+		public int Id;
 
-    // gpu rendering data
-    public CommandBuffer waterCommandBuffer;
-    public CommandBuffer lavaCommandBuffer;
-    public ComputeBuffer waterBuffer;
-    public ComputeBuffer lavaBuffer;
+		public Vector3 WorldPos;
 
-    public void Initialize(Block block, int id)
-    {
-        this.transform.parent = block.transform;
-        this.block = block;
-        this.id = id;
+		public Chunk Top;
+		public Chunk Bottom;
+		public Chunk Forward;
+		public Chunk Backward;
+		public Chunk Right;
+		public Chunk Left;
 
-        // cpu rendering data
-        GameObject solidMeshGo = new GameObject("solid mesh");
-        solidMeshGo.transform.parent = this.transform;
-        solidMeshGo.AddComponent<MeshFilter>();   // to be passed into mesh generator
-        solidMeshGo.AddComponent<MeshRenderer>();
-        solidMeshGo.AddComponent<MeshCollider>(); // used for mouse interaction with the scene (raycasting)
+		public ChunkRenderData RenderData;
 
-        GameObject lavaMeshGo = new GameObject("lava mesh");
-        lavaMeshGo.transform.parent = this.transform;
-        lavaMeshGo.AddComponent<MeshFilter>();
-        lavaMeshGo.AddComponent<MeshRenderer>();
+		public void Initialize(int id, Transform parent, WorldApi worldApi, Block block)
+		{
+			Id = id;
+			transform.parent = parent;
+			Block = block;
 
-        GameObject fluidMeshGo = new GameObject("fluid mesh");
-        fluidMeshGo.transform.parent = this.transform;
-        fluidMeshGo.AddComponent<MeshFilter>();
-        fluidMeshGo.AddComponent<MeshRenderer>();
-    }
+			worldApi.GetChunkWorldPos(block.Id, Id, out Vector3 worldPos);
+			WorldPos = worldPos;
 
-    public bool HasSettledNeighbours()
-    {
-        return (top == null || top.settled) &&
-            (bottom == null || bottom.settled) &&
-            (forward == null || forward.settled) &&
-            (backward == null || backward.settled) &&
-            (right == null || right.settled) &&
-            (left == null || left.settled);
-    }
+			RenderData = new ChunkRenderData(this);
+		}
+
+		/// <summary>
+		/// Marks chunk as unsettled to notify the simulation of changes in this chunk and also so that its mesh gets updated.
+		/// </summary>
+		public void Unsettle(bool alsoNeighbours = true)
+		{
+			lock (Block.SimData.hashSetLock)
+			{
+				Block.SimData.UnsettledChunks.Add(Id);
+			}
+
+			if (alsoNeighbours)
+			{
+				for (int i = 0; i < Voxel.kNeighbourCount; i++)
+				{
+					GetNeighbour((Neighbour)i)?.Unsettle(false);
+				}
+			}
+		}
+
+		private Chunk GetNeighbour(Neighbour neighbour)
+		{
+			switch (neighbour)
+			{
+				case Neighbour.Top:
+					return Top;
+				case Neighbour.Bottom:
+					return Bottom;
+				case Neighbour.Forward:
+					return Forward;
+				case Neighbour.Backward:
+					return Backward;
+				case Neighbour.Left:
+					return Left;
+				case Neighbour.Right:
+					return Right;
+			}
+
+			return null;
+		}
+
+		public void Dispose()
+		{
+			RenderData.Dispose();
+		}
+	}
 }

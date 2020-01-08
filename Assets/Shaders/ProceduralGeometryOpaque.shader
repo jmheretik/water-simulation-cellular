@@ -15,6 +15,7 @@ Shader "Procedural Geometry/Marching Cubes/Opaque"
 
 			#include "UnityCG.cginc"
 
+			float _voxelSize;
 			float4 _color;
 			uniform float4x4 _model;
 
@@ -43,7 +44,7 @@ Shader "Procedural Geometry/Marching Cubes/Opaque"
 				uint vid = id % 3;
 
 				v2f o;
-				o.vertex = UnityObjectToClipPos(triangleBuffer[pid].v[vid].vPosition);
+				o.vertex = UnityObjectToClipPos(triangleBuffer[pid].v[vid].vPosition * _voxelSize);
 				o.normal = mul(unity_ObjectToWorld, triangleBuffer[pid].v[vid].vNormal);
 				return o;
 			}

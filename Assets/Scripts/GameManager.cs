@@ -1,15 +1,16 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
+using TerrainEngine.Fluid.New;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 public enum GameMode
 {
-    Fluid,
-    Camera,
-    Terrain
+	Fluid,
+	Camera,
+	Terrain
 }
 
 /// <summary>
@@ -17,265 +18,347 @@ public enum GameMode
 /// </summary>
 public class GameManager : MonoBehaviour
 {
-    [Header("Required references")]
-    public TerrainGenerator terrainGenerator;
-    public FluidProcessor fluidProcessor;
-    public MarchingCubesMeshGenerator meshGenerator;
+	[Header("Required references")]
+	public FluidProcessor FluidProcessor;
+	public TerrainGenerator TerrainGenerator;
+	public MarchingCubesMeshGenerator MeshGenerator;
+	public World World;
+	public WorldApi WorldApi;
+	public bool SkipMainMenu = false;
 
-    [Header("UI packages")]
-    public GameObject mainMenuUI;
-    public GameObject sceneUI, eventSystem, canvas;
+	[Header("UI packages")]
+	public GameObject MainMenuUI;
+	public GameObject SceneUI, EventSystem;
 
-    [Header("Menu UI elements")]
-    public Button startButton;
-    public Toggle gpuFluidRenderingToggle;
-    public GameObject randomShapeSettings;
-    public InputField randomSeedInputField;
-    public Text worldSizeXText, worldSizeYText, worldSizeZText, randomFillPercentText, randomSmoothStepsText;
+	[Header("Menu UI elements")]
+	public Button StartButton;
+	public Toggle GpuFluidRenderingToggle;
+	public GameObject RandomShapeSettings;
+	public InputField RandomSeedInputField;
+	public Text WorldSizeXText, WorldSizeYText, WorldSizeZText, RandomFillPercentText, RandomSmoothStepsText;
 
-    [Header("Scene UI elements")]
-    public Text fluidRadiusText;
-    public Text fluidValueText, terrainRadiusText, terrainValueText, isoValueText, componentUpdateIntervalText;
-    public Button fluidButton, cameraButton, terrainButton;
+	[Header("Scene UI elements")]
+	public Text FluidRadiusText;
+	public Text FluidValueText, TerrainRadiusText, TerrainValueText, IsoValueText;
+	public Button FluidButton, CameraButton, TerrainButton;
 
-    [Header("World generation")]
-    public int worldSizeX = 1;
-    public int worldSizeY = 1;
-    public int worldSizeZ = 1;
-    public World world;
+	private OrbitCamera _orbitCamera;
+	private GameMode _currentMode;
+	private GameMode _lastMode;
+	private ColorBlock _activeButtonColorBlock;
+	private ColorBlock _inactiveButtonColorBlock;
+	private bool _worldLoaded = false;
+	private bool _disposing = false;
 
-    [HideInInspector]
-    public OrbitCamera orbitCamera;
+	#region initialization
 
-    [HideInInspector]
-    public GameMode currentMode;
-    private GameMode lastMode;
-    private ColorBlock activeButtonColorBlock;
-    private ColorBlock inactiveButtonColorBlock;
+	void Start()
+	{
+		// preserve GameManager across different scenes
+		DontDestroyOnLoad(this.gameObject);
 
-    void Awake()
-    {
-        // preserve GameManager and UI across different scenes
-        DontDestroyOnLoad(this.gameObject);
-        DontDestroyOnLoad(eventSystem.gameObject);
-        DontDestroyOnLoad(canvas.gameObject);
-    }
+		// disable gpu fluid rendering and show error if not supported
+		if (SystemInfo.graphicsShaderLevel < 45)
+		{
+			GpuFluidRenderingToggle.interactable = false;
+			GpuFluidRenderingToggle.isOn = false;
+			GpuFluidRenderingToggle.GetComponentsInChildren<Text>()[1].enabled = true;
+			MeshGenerator.GpuFluidRendering = false;
+		}
 
-    void Start()
-    {
-        terrainGenerator = GetComponent<TerrainGenerator>();
-        fluidProcessor = GetComponent<FluidProcessor>();
-        meshGenerator = GetComponent<MarchingCubesMeshGenerator>();
+		// scene loaded event
+		SceneManager.sceneLoaded += OnSceneFinishedLoading;
 
-        // disable gpu fluid rendering and show error if not supported
-        if (SystemInfo.graphicsShaderLevel < 45)
-        {
-            gpuFluidRenderingToggle.interactable = false;
-            gpuFluidRenderingToggle.isOn = false;
-            gpuFluidRenderingToggle.GetComponentsInChildren<Text>()[1].enabled = true;
-            meshGenerator.gpuFluidRendering = false;
-        }
+		// initial random seed
+		if (String.IsNullOrEmpty(TerrainGenerator.RandomSeed))
+		{
+			TerrainGenerator.RandomSeed = GetRandomText(UnityEngine.Random.Range(1, 15));
+			RandomSeedInputField.text = TerrainGenerator.RandomSeed;
+		}
 
-        // scene loaded event
-        SceneManager.sceneLoaded += OnSceneFinishedLoading;
+		// save inactiveButtonColorBlock for mode button styles
+		_activeButtonColorBlock = FluidButton.colors;
+		ColorBlock cb = _activeButtonColorBlock;
+		cb.normalColor = cb.disabledColor;
+		_inactiveButtonColorBlock = cb;
 
-        // initial random seed
-        terrainGenerator.randomSeed = GetRandomText(UnityEngine.Random.Range(1, 15));
-        randomSeedInputField.text = terrainGenerator.randomSeed;
+#if UNITY_EDITOR
+		//Debug.Log("size of voxel:" + System.Runtime.InteropServices.Marshal.SizeOf(typeof(Voxel)));
+		//Application.targetFrameRate = 300;
 
-        // save inactiveButtonColorBlock for mode button styles
-        activeButtonColorBlock = fluidButton.colors;
-        ColorBlock cb = activeButtonColorBlock;
-        cb.normalColor = cb.disabledColor;
-        inactiveButtonColorBlock = cb;
-    }
+		if (SkipMainMenu)
+		{
+			LoadScene("scene");
+		}
+#endif
+	}
 
-    void Update()
-    {
-        if (world == null || !world.terrainLoaded)
-            return;
+	#endregion
 
-        // update meshes if iso level changed
-        if (meshGenerator.CheckIsoLevel())
-        {
-            world.UpdateAllMeshes();
-        }
+	void Update()
+	{
+		if (!_worldLoaded || _disposing)
+			return;
 
-        // toggle camera mode if ALT is held
-        CheckPressedAlt();
+		// update meshes if iso level changed
+		if (MeshGenerator.CheckIsoLevel())
+		{
+			WorldApi.UpdateAllMeshes();
+		}
 
-        if (currentMode == GameMode.Camera)
-        {
-            orbitCamera.UpdateCamera();
-        }
-        else if (Input.GetMouseButton(0) || Input.GetMouseButton(1))
-        {
-            // raycast to terrain and modify fluid/terrain at mouse position 
-            HandleUserInput();
-        }
+		// toggle camera mode if ALT is held
+		CheckPressedAlt();
 
-        // fluid simulation
-        fluidProcessor.FluidUpdate();
+		if (_currentMode == GameMode.Camera)
+		{
+			_orbitCamera.UpdateCamera();
+		}
+		else
+		{
+			ProcessUserInput();
+		}
 
-        world.TrySettleChunks();
+		// fluid simulation
+		UnityEngine.Profiling.Profiler.BeginSample("FluidUpdate");
+		FluidProcessor.FluidUpdate();
+		UnityEngine.Profiling.Profiler.EndSample();
+	}
 
-        // update fluid meshes
-        if (!world.debugVoxelGrid)
-        {
-            world.UpdateMeshes(false, false);
-            world.UpdateMeshes(false, true);
-        }
-    }
+	/// <summary>
+	/// If mouse buttons are clicked - raycast to terrain and modify fluid/terrain at mouse position.
+	/// </summary>
+	private void ProcessUserInput()
+	{
+		if (Input.GetMouseButton(0) || Input.GetMouseButton(1))
+		{
+			Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
 
-    private void HandleUserInput()
-    {
-        bool add = Input.GetMouseButton(0);
+			if (Physics.Raycast(ray, out RaycastHit hitInfo))
+			{
+				bool add = Input.GetMouseButton(0);
 
-        RaycastHit hitInfo;
-        Ray ray = Camera.main.ScreenPointToRay(Input.mousePosition);
+				FluidProcessor.WaitUntilSimulationComplete();
 
-        if (Physics.Raycast(ray, out hitInfo))
-        {
-            if (currentMode == GameMode.Fluid)
-            {
-                fluidProcessor.ModifyFluid(hitInfo.point, add);
-            }
-            else if (currentMode == GameMode.Terrain)
-            {
-                if (!add && Input.GetKey(KeyCode.R))
-                {
-                    terrainGenerator.RemoveTerrain(hitInfo.point, fluidProcessor.componentManager);
-                }
-                else
-                {
-                    terrainGenerator.ModifyTerrain(hitInfo.point, add, fluidProcessor.componentManager);
-                }
-            }
+				if (_currentMode == GameMode.Fluid)
+				{
+					FluidProcessor.ModifyFluid(hitInfo.point, add);
+				}
+				else if (_currentMode == GameMode.Terrain)
+				{
+					if (!add && Input.GetKey(KeyCode.R))
+					{
+						TerrainGenerator.RemoveTerrain(hitInfo.point);
+					}
+					else
+					{
+						TerrainGenerator.ModifyTerrain(hitInfo.point, add);
+					}
 
-            world.UpdateValues();
+					// update solid meshes
+					WorldApi.UpdateUnsettledMeshes(true);
+				}
 
-            if (currentMode == GameMode.Terrain)
-            {
-                world.UpdateMeshes(true);
-            }
-        }
-    }
+				// stop the rebuild of components while the terrain is being modified or fluid subtracted
+				FluidProcessor.ComponentManager.RebuildEnabled = !(_currentMode == GameMode.Terrain || !add);
+			}
+		}
+		else
+		{
+			// start the rebuild of components once the modifications are done
+			FluidProcessor.ComponentManager.RebuildEnabled = true;
+		}
+	}
 
-    #region button events
+	private void OnDestroy()
+	{
+		_disposing = true;
 
-    public void LoadScene(string name)
-    {
-        startButton.interactable = false;
-        startButton.GetComponentInChildren<Text>().text = "Loading";
+		FluidProcessor.Dispose();
+		MeshGenerator.Dispose();
+		World.Dispose();
+	}
 
-        // load new scene
-        SceneManager.LoadScene(name);
-    }
+	#region button events
 
-    public void ChangeMode(int mode)
-    {
-        lastMode = currentMode;
-        currentMode = (GameMode)mode;
+	public void LoadScene(string name)
+	{
+		StartButton.interactable = false;
+		StartButton.GetComponentInChildren<Text>().text = "Loading";
 
-        fluidButton.colors = currentMode == GameMode.Fluid ? activeButtonColorBlock : inactiveButtonColorBlock;
-        cameraButton.colors = currentMode == GameMode.Camera ? activeButtonColorBlock : inactiveButtonColorBlock;
-        terrainButton.colors = currentMode == GameMode.Terrain ? activeButtonColorBlock : inactiveButtonColorBlock;
-    }
+		// load new scene
+		SceneManager.LoadScene(name);
+	}
 
-    public void GenerateRandomSeedClicked()
-    {
-        terrainGenerator.randomSeed = GetRandomText(UnityEngine.Random.Range(1, 15));
-        randomSeedInputField.text = terrainGenerator.randomSeed;
-    }
+	public void ChangeMode(int mode)
+	{
+		_lastMode = _currentMode;
+		_currentMode = (GameMode)mode;
 
-    public void ExitGame()
-    {
-        Application.Quit();
-    }
+		FluidButton.colors = _currentMode == GameMode.Fluid ? _activeButtonColorBlock : _inactiveButtonColorBlock;
+		CameraButton.colors = _currentMode == GameMode.Camera ? _activeButtonColorBlock : _inactiveButtonColorBlock;
+		TerrainButton.colors = _currentMode == GameMode.Terrain ? _activeButtonColorBlock : _inactiveButtonColorBlock;
+	}
 
-    #endregion
+	public void GenerateRandomSeedClicked()
+	{
+		TerrainGenerator.RandomSeed = GetRandomText(UnityEngine.Random.Range(1, 15));
+		RandomSeedInputField.text = TerrainGenerator.RandomSeed;
+	}
 
-    #region toggle and dropdown events
+	public void ExitGame()
+	{
+		Application.Quit();
+	}
 
-    public void FluidRenderingToggled()
-    {
-        meshGenerator.gpuFluidRendering = !meshGenerator.gpuFluidRendering;
-    }
+	#endregion
 
-    public void TerrainShapeDropdownValueChanged(int option)
-    {
-        terrainGenerator.shape = (TerrainShape)option;
+	#region toggle and dropdown events
 
-        randomShapeSettings.SetActive(terrainGenerator.shape == TerrainShape.Random);
-    }
+	public void FluidRenderingToggled()
+	{
+		MeshGenerator.GpuFluidRendering = !MeshGenerator.GpuFluidRendering;
+	}
 
-    public void FluidTypeDropdownValueChanged(int option)
-    {
-        ChangeMode((int)GameMode.Fluid);
-        fluidProcessor.flowViscosity = option == 0 ? FlowViscosity.Water : option == 1 ? FlowViscosity.Lava : 0;
-    }
+	public void TerrainShapeDropdownValueChanged(int option)
+	{
+		TerrainGenerator.Shape = (TerrainShape)option;
 
-    #endregion
+		RandomShapeSettings.SetActive(TerrainGenerator.Shape == TerrainShape.Random);
+	}
 
-    #region slider events
+	public void FluidTypeDropdownValueChanged(int option)
+	{
+		ChangeMode((int)GameMode.Fluid);
+		FluidProcessor.FlowViscosity = option == 0 ? Viscosity.Water : option == 1 ? Viscosity.Lava : 0;
+	}
 
-    // world sliders
-    public void WorldSizeXChanged(float value) { worldSizeX = (int)value; worldSizeXText.text = value.ToString(); }
-    public void WorldSizeYChanged(float value) { worldSizeY = (int)value; worldSizeYText.text = value.ToString(); }
-    public void WorldSizeZChanged(float value) { worldSizeZ = (int)value; worldSizeZText.text = value.ToString(); }
+	#endregion
 
-    // terrain sliders
-    public void TerrainRadiusChanged(float value) { terrainGenerator.terrainRadius = (int)value; terrainRadiusText.text = value.ToString(); ChangeMode((int)GameMode.Terrain); }
-    public void TerrainValueChanged(float value) { terrainGenerator.terrainValue = (byte)value; terrainValueText.text = value.ToString(); ChangeMode((int)GameMode.Terrain); }
-    public void RandomFillPercentChanged(float value) { terrainGenerator.randomFillPercent = (int)value; randomFillPercentText.text = value.ToString(); }
-    public void RandomSmoothStepsChanged(float value) { terrainGenerator.smoothSteps = (int)value; randomSmoothStepsText.text = value.ToString(); }
-    public void RandomSeedChanged(string value) { terrainGenerator.randomSeed = value; }
+	#region slider events
 
-    // fluid sliders
-    public void FluidRadiusChanged(float value) { fluidProcessor.flowRadius = (int)value; fluidRadiusText.text = value.ToString(); ChangeMode((int)GameMode.Fluid); }
-    public void FluidValueChanged(float value) { fluidProcessor.flowValue = (byte)value; fluidValueText.text = value.ToString(); ChangeMode((int)GameMode.Fluid); }
-    public void IsoValueChanged(float value) { meshGenerator.isoLevel = value; isoValueText.text = value.ToString("0.0"); ChangeMode((int)GameMode.Fluid); }
-    public void ComponentUpdateIntervalChanged(float value) { fluidProcessor.componentsUpdateInterval = value; componentUpdateIntervalText.text = value.ToString("0.0"); ChangeMode((int)GameMode.Fluid); }
+	// world sliders
+	public void WorldSizeXChanged(float value)
+	{
+		WorldApi.SizeX = (int)value;
+		WorldSizeXText.text = value.ToString();
+	}
+	public void WorldSizeYChanged(float value)
+	{
+		WorldApi.SizeY = (int)value;
+		WorldSizeYText.text = value.ToString();
+	}
+	public void WorldSizeZChanged(float value)
+	{
+		WorldApi.SizeZ = (int)value;
+		WorldSizeZText.text = value.ToString();
+	}
 
-    #endregion
+	// terrain sliders
+	public void TerrainRadiusChanged(float value)
+	{
+		TerrainGenerator.TerrainRadius = (int)value;
+		TerrainRadiusText.text = value.ToString();
+		ChangeMode((int)GameMode.Terrain);
+	}
+	public void TerrainValueChanged(float value)
+	{
+		TerrainGenerator.TerrainValue = (byte)value;
+		TerrainValueText.text = value.ToString();
+		ChangeMode((int)GameMode.Terrain);
+	}
+	public void RandomFillPercentChanged(float value)
+	{
+		TerrainGenerator.RandomFillPercent = (int)value;
+		RandomFillPercentText.text = value.ToString();
+	}
+	public void RandomSmoothStepsChanged(float value)
+	{
+		TerrainGenerator.SmoothSteps = (int)value;
+		RandomSmoothStepsText.text = value.ToString();
+	}
+	public void RandomSeedChanged(string value)
+	{
+		TerrainGenerator.RandomSeed = value;
+	}
 
-    #region private methods
+	// fluid sliders
+	public void FluidRadiusChanged(float value)
+	{
+		FluidProcessor.FlowRadius = (int)value;
+		FluidRadiusText.text = value.ToString();
+		ChangeMode((int)GameMode.Fluid);
+	}
+	public void FluidValueChanged(float value)
+	{
+		FluidProcessor.FlowValue = (byte)value;
+		FluidValueText.text = value.ToString();
+		ChangeMode((int)GameMode.Fluid);
+	}
+	public void IsoValueChanged(float value)
+	{
+		MeshGenerator.IsoLevel = value;
+		IsoValueText.text = value.ToString("0.0");
+		ChangeMode((int)GameMode.Fluid);
+	}
 
-    private void CheckPressedAlt()
-    {
-        if (Input.GetKeyDown(KeyCode.LeftAlt))
-        {
-            ChangeMode((int)GameMode.Camera);
-        }
+	#endregion
 
-        if (Input.GetKeyUp(KeyCode.LeftAlt))
-        {
-            ChangeMode((int)lastMode);
-        }
-    }
+	#region private methods
 
-    private void OnSceneFinishedLoading(Scene scene, LoadSceneMode mode)
-    {
-        // switch UI
-        mainMenuUI.SetActive(false);
-        sceneUI.SetActive(true);
+	private void CheckPressedAlt()
+	{
+		if (Input.GetKeyDown(KeyCode.LeftAlt))
+		{
+			ChangeMode((int)GameMode.Camera);
+		}
 
-        // start new scene in camera mode
-        ChangeMode((int)GameMode.Camera);
-    }
+		if (Input.GetKeyUp(KeyCode.LeftAlt))
+		{
+			ChangeMode((int)_lastMode);
+		}
+	}
 
-    private string GetRandomText(int length)
-    {
-        string seed = "";
-        string glyphs = "abcdefghijklmnopqrstuvwxyz0123456789";
+	private void OnSceneFinishedLoading(Scene scene, LoadSceneMode mode)
+	{
+		// switch UI
+		MainMenuUI.SetActive(false);
+		SceneUI.SetActive(true);
 
-        for (int i = 0; i < length; i++)
-        {
-            seed += glyphs[UnityEngine.Random.Range(0, glyphs.Length)];
-        }
+		InitializeWorld();
 
-        return seed;
-    }
+		_orbitCamera = FindObjectOfType<OrbitCamera>();
+		_orbitCamera.Initialize(WorldApi);
 
-    #endregion
+		// start new scene in camera mode
+		ChangeMode((int)GameMode.Camera);
+	}
+
+	private void InitializeWorld()
+	{
+		FluidProcessor.Initialize();
+		TerrainGenerator.Initialize();
+		MeshGenerator.Initialize();
+
+		World.Initialize();
+		World.LoadTerrain(TerrainGenerator);
+		WorldApi.UpdateAllMeshes();
+
+		_worldLoaded = true;
+	}
+
+	private string GetRandomText(int length)
+	{
+		string seed = "";
+		string glyphs = "abcdefghijklmnopqrstuvwxyz0123456789";
+
+		for (int i = 0; i < length; i++)
+		{
+			seed += glyphs[UnityEngine.Random.Range(0, glyphs.Length)];
+		}
+
+		return seed;
+	}
+
+	#endregion
+
 }

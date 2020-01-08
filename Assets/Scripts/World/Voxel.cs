@@ -1,187 +1,212 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Generic;
-using UnityEngine;
+using System.Runtime.InteropServices;
+using Unity.Mathematics;
 
-/// <summary>
-/// Voxel's possible neighbours.
-/// </summary>
-public enum Neighbour
-{
-	Forward,
-	Backward,
-	Top,
-	Bottom,
-	Right,
-	Left
-}
-
-/// <summary>
-/// One voxel. A single cell in cellular automata used for fluid simulation.
-/// </summary>
-public struct Voxel
+namespace TerrainEngine.Fluid.New
 {
 	/// <summary>
-	/// Max volume allowed in one voxel.
+	/// Possible neighbours in 3D in Von Neumann's neighbourhood.
 	/// </summary>
-	public const byte MaxVolume = byte.MaxValue / 2;
-
-	/// <summary>
-	/// Voxels settled with fluid less than this will have their fluid removed or differences between 2 voxels less than this will not be considered.
-	/// </summary>
-	public const byte Epsilon = NeighbourCount - 1;
-
-	/// <summary>
-	/// Number of voxel's neighbours. Must correspond to number of members of Neighbour enum.
-	/// </summary>
-	public const int NeighbourCount = 6;
-
-	public byte solid;
-	public byte fluid;
-	public byte viscosity;
-
-	public short settleCounter;
-
-	public bool valid;
-	public bool settled;
-	public bool teleporting;
-
-	/// <summary>
-	/// Reset settle counter to its initial value.
-	/// </summary>
-	public void Unsettle()
+	public enum Neighbour
 	{
-		settleCounter = 30 * byte.MaxValue;
-		settled = false;
+		Forward,
+		Backward,
+		Top,
+		Bottom,
+		Right,
+		Left
 	}
 
 	/// <summary>
-	/// Decreases the settle counter in order for voxel to reach a settled state.
+	/// One voxel. The smallest unit in the world and a single cell in cellular automata used for fluid simulation.
 	/// </summary>
-	public void DecreaseSettle()
+	[StructLayout(LayoutKind.Sequential)]
+	public struct Voxel
 	{
-		if (IsAir)
+		#region constants
+
+		/// <summary>
+		/// Max volume allowed in one voxel.
+		/// </summary>
+		public const byte kMaxVolume = byte.MaxValue / 2;
+
+		/// <summary>
+		/// To convert Fluid or Solid values to float.
+		/// </summary>
+		public const float kByteToFloat = 1f / kMaxVolume;
+
+		/// <summary>
+		/// To convert byte values to float.
+		/// </summary>
+		public const float kByteMaxValueToFloat = 1f / byte.MaxValue;
+
+		/// <summary>
+		/// Proportional max value to share amongst voxel's horizontal neighbours.
+		/// </summary>
+		public const float kNeighbourShareFloat = 1f / (kNeighbourCount - 1);
+
+		/// <summary>
+		/// Voxels settled with fluid less than this will have their fluid removed.
+		/// </summary>
+		public const byte kEpsilon = kNeighbourCount - 1;
+
+		/// <summary>
+		/// Number of voxel's neighbours. Must correspond to number of members of Neighbour enum.
+		/// </summary>
+		public const int kNeighbourCount = 6;
+
+		#endregion
+
+		public readonly static Voxel Invalid;
+
+		// TODO BitVector32 or BitArrays per chunk/block or lower the ranges and pack everything to just few bytes
+		public byte Solid;
+		public byte Fluid;
+		public byte Viscosity;
+
+		private ushort _settleCounter;
+		private byte _settled;
+		private byte _valid;
+
+		#region bool wrappers
+
+		/// <summary>
+		/// Only unsettled voxels or voxels with unsettled neighbours are taken into account during simulation.
+		/// Once the voxel becomes settled it can be assigned to a FluidComponent.
+		/// Defaults to true.
+		/// </summary>
+		public bool Settled
 		{
-			Settle();
-			return;
+			get
+			{
+				return _settled == 0;
+			}
+			set
+			{
+				_settled = (byte)(value ? 0 : 1);
+			}
 		}
 
-		if (settleCounter <= 0)
+		/// <summary>
+		/// Used instead of null check.
+		/// Defaults to false.
+		/// </summary>
+		public bool Valid
 		{
-			Settle();
-		}
-		else
-		{
-			if (viscosity == 0)
+			get
 			{
-				settleCounter -= byte.MaxValue;
+				return _valid == 1;
+			}
+			set
+			{
+				_valid = (byte)(value ? 1 : 0);
+			}
+		}
+
+		#endregion
+
+		// TODO faster?
+		/// <summary>
+		/// Marks voxel as unsettled so that it takes part in the simulation.
+		/// Also its settle counter is raised by the given difference in volume since the previous state.
+		/// </summary>
+		public void Unsettle(int diff)
+		{
+			_settleCounter = (ushort)math.min(_settleCounter + math.abs(diff), ushort.MaxValue);
+			Settled = false;
+		}
+
+		/// <summary>
+		/// Decreases the settle counter by voxel's viscosity in order for it to reach a settled state.
+		/// </summary>
+		public void DecreaseSettle()
+		{
+			// ready to settle or air
+			if (_settleCounter == 0 || (Solid == 0 && Fluid == 0))
+			{
+				Settle();
 			}
 			else
 			{
-				settleCounter -= viscosity;
+				int value = math.select((int)Viscosity, byte.MaxValue, Viscosity == 0);
+
+				_settleCounter = (ushort)math.max(_settleCounter - value, 0);
 			}
 		}
-	}
 
-	/// <summary>
-	/// Puts voxel to a settled state.
-	/// </summary>
-	public void Settle()
-	{
-		if (fluid < Epsilon && solid + fluid < MaxVolume)
+		/// <summary>
+		/// Puts voxel to a settled state.
+		/// </summary>
+		public void Settle()
 		{
-			fluid = 0;
-			viscosity = 0;
+			if (Fluid <= kEpsilon && Solid + Fluid < kMaxVolume)
+			{
+				Fluid = 0;
+				Viscosity = 0;
+			}
+
+			if (Fluid > kMaxVolume - Solid)
+			{
+				Fluid = (byte)(kMaxVolume - Solid);
+			}
+
+			_settleCounter = 0;
+			Settled = true;
 		}
 
-		if (fluid > MaxVolume - solid)
+		/// <summary>
+		/// Returns true if the neighbour is not null and has a compatible viscosity.
+		/// </summary>
+		public bool HasCompatibleViscosity(in Voxel neighbour)
 		{
-			fluid = (byte)(MaxVolume - solid);
+			return neighbour.Valid && (Viscosity == 0 || neighbour.Viscosity == 0 || Viscosity == neighbour.Viscosity);
 		}
 
-		settleCounter = 0;
-		settled = true;
-
-		teleporting = false;
-	}
-
-	/// <summary>
-	/// Returns true if the neighbour is not null and has a compatible viscosity.
-	/// </summary>
-	public bool HasCompatibleViscosity(ref Voxel neighbour)
-	{
-		return neighbour.valid && (viscosity == 0 || neighbour.viscosity == 0 || viscosity == neighbour.viscosity);
-	}
-
-	public bool HasFluid
-	{
-		get
+		public bool HasFluid
 		{
-			return fluid > 0;
+			get
+			{
+				return Fluid > 0;
+			}
 		}
-	}
 
-	public bool IsFull
-	{
-		get
+		public bool IsFull
 		{
-			return solid + fluid >= MaxVolume;
+			get
+			{
+				return Solid + Fluid >= kMaxVolume;
+			}
 		}
-	}
 
-	public bool IsAir
-	{
-		get
+		public byte CurrentVolume
 		{
-			return solid == 0 && fluid == 0;
+			get
+			{
+				return (byte)(Solid + Fluid);
+			}
 		}
-	}
 
-	public bool IsTerrain
-	{
-		get
+		public byte ExcessVolume
 		{
-			return solid == MaxVolume && fluid == 0;
+			get
+			{
+				return (byte)math.max(Solid + Fluid - kMaxVolume, 0);
+			}
 		}
-	}
 
-	public byte CurrentVolume
-	{
-		get
+		public byte FreeVolume
 		{
-			return (byte)(solid + fluid);
+			get
+			{
+				return (byte)math.max(kMaxVolume - Solid - Fluid, 0);
+			}
 		}
-	}
 
-	public byte ExcessFluid
-	{
-		get
+		public override string ToString()
 		{
-			return (byte)(solid + fluid <= MaxVolume ? 0 : solid + fluid > byte.MaxValue ? byte.MaxValue - MaxVolume : solid + fluid - MaxVolume);
+			return String.Format("{0}: {1}/{2}", Settled, Fluid.ToString(), Solid.ToString());
 		}
-	}
-
-	public byte FreeVolume
-	{
-		get
-		{
-			return (byte)(solid + fluid <= MaxVolume ? MaxVolume - solid - fluid : 0);
-		}
-	}
-
-	/// <summary>
-	/// Render voxel as full of fluid if it's teleporting to hide flickering.
-	/// </summary>
-	public float RenderFluid
-	{
-		get
-		{
-			return /*teleporting ? 1 :*/ (float)fluid / MaxVolume;
-		}
-	}
-
-	public override string ToString()
-	{
-		return string.Format("{0}/{1}", fluid.ToString(), solid.ToString());
 	}
 }
